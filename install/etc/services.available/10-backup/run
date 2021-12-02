@@ -1,0 +1,232 @@
+#!/usr/bin/with-contenv bash
+
+source /assets/functions/00-container
+
+PROCESS_NAME="backup"
+
+date >/dev/null
+
+### DEFAULTS
+tmpdir=/tmp/backups
+volumedir=/backupVolume
+notification_message=""
+
+DB_DUMP_BEGIN=${DB_DUMP_BEGIN:--1}
+DB_DUMP_FREQ=${DB_DUMP_FREQ:-1440}
+GOOGLE_CHAT_IDENTIFIER=${GOOGLE_CHAT_IDENTIFIER:-"Test"}
+
+[[ ( -n "${GOOGLE_CHAT_EDNPOINT}" ) ]] && USE_NOTIFICATION=true || USE_NOTIFICATION=false
+
+send_notification() {
+    time=$(date +"%Y-%m-%d %T %Z")
+    curl -X POST \
+        $GOOGLE_CHAT_EDNPOINT \
+        -H "content-type: application/json" \
+        -d "
+            {
+            \"cards\": [
+                {
+                \"header\": {
+                    \"title\": \"<b>${GOOGLE_CHAT_IDENTIFIER}</b>\",
+                    \"subtitle\": \"${time}\"
+                },
+                \"sections\": [
+                    {
+                        \"widgets\": [ ${notification_message} ]
+                    }
+                ]
+                }
+            ]
+            }
+        "
+    notification_message=""
+}
+
+sleep 10
+
+### S3 DESTINATION
+sanity_var S3_DST_HOST "S3 Host"
+sanity_var S3_DST_BUCKET "S3 Bucket"
+sanity_var S3_DST_KEY_ID "S3 Key ID"
+sanity_var S3_DST_KEY_SECRET "S3 Key Secret"
+
+[[ ( -n "${S3_DST_HOST}" ) ]] && [[ ( -n "${S3_DST_BUCKET}" ) ]] && [[ ( -n "${S3_DST_KEY_ID}" ) ]] && [[ ( -n "${S3_DST_KEY_SECRET}" ) ]] && IS_S3_CONFIGURED=true || IS_S3_CONFIGURED=false
+
+if $IS_S3_CONFIGURED; then
+    mc alias set destination "https://${S3_DST_HOST}" "${S3_DST_KEY_ID}" "${S3_DST_KEY_SECRET}" --api S3v4
+else
+    notification_message="{
+        \"textParagraph\": {
+            \"text\": \"<font color=\"#ff0000\">S3 destination configuration is missing. Skipping backup.</font>\"
+        } 
+    }"
+    send_notification
+    echo "S3 destination configuration is missing. Skipping backup."
+    exit 0
+fi
+
+
+
+### MONGO 
+MONGO_DB_HOST="${DB_HOST}"
+MONGO_DB_PORT=${DB_PORT:-27017}
+[[ ( -n "${DB_USER}" ) ]] && MONGO_USER_STR=" --username ${DB_USER}"
+[[ ( -n "${DB_PASS}" ) ]] && MONGO_PASS_STR=" --password ${DB_PASS}"
+[[ ( -n "${DB_NAME}" ) ]] && MONGO_DB_STR=" --db ${DB_NAME}"
+[[ ( -n "${DB_AUTH}" ) ]] && MONGO_AUTH_STR=" --authenticationDatabase ${DB_AUTH}"
+[[ ( -n "${MONGO_DB_HOST}" ) ]] && ENABLE_MONGO_BACKUP=true || ENABLE_MONGO_BACKUP=false 
+
+### VOLUME
+[ "$(ls -A ${volumedir})" ] && ENABLE_VOLUME_BACKUP=true || ENABLE_VOLUME_BACKUP=false
+
+### MINIO
+[[ ( -n "${MINIO_SRC_HOST}" ) ]] && [[ ( -n "${MINIO_SRC_BUCKET}" ) ]] && [[ ( -n "${MINIO_SRC_KEY_ID}" ) ]] && [[ ( -n "${MINIO_SRC_KEY_SECRET}" ) ]] && ENABLE_MINIO_BACKUP=true || ENABLE_MINIO_BACKUP=false
+
+if $ENABLE_MINIO_BACKUP; then
+    mc alias set source "http://${MINIO_SRC_HOST}" "${MINIO_SRC_KEY_ID}" "${MINIO_SRC_KEY_SECRET}" --api S3v4
+fi
+
+### Functions
+
+backup_mongo() {
+    start_time=$(date +"%s")
+    target=${DB_NAME}_${MONGO_DB_HOST}.archive.gz
+    mongo_compression="--gzip"
+    message=$(mongodump --archive=${tmpdir}/${target} ${mongo_compression} --host ${MONGO_DB_HOST} --port ${MONGO_DB_PORT} ${MONGO_USER_STR}${MONGO_PASS_STR}${MONGO_AUTH_STR}${MONGO_DB_STR} ${DB_EXTRA_OPTS})
+    end_time=$(date +"%s") 
+    notification_message+="{
+              \"keyValue\": {
+                \"topLabel\": \"Dumping Mongo\",
+                \"content\": \"${message:--}\",
+                \"contentMultiline\": \"true\",
+                \"bottomLabel\": \"Duration: $(($end_time - $start_time)) seconds\"
+              }
+            },"
+}
+
+sync_mongo() {
+    start_time=$(date +"%s")
+    message=$(mc cp ${tmpdir}/${target} destination/${S3_DST_BUCKET}/database/)
+    end_time=$(date +"%s") 
+    notification_message+="{
+              \"keyValue\": {
+                \"topLabel\": \"Syncing Mongo\",
+                \"content\": \"${message:--}\",
+                \"contentMultiline\": \"true\",
+                \"bottomLabel\": \"Duration: $(($end_time - $start_time)) seconds\"
+              }
+            },"
+    rm -rf ${tmpdir}/"${target}"
+}
+
+sync_volumes() {
+  start_time=$(date +"%s")
+  message=$(mc mirror ${volumedir}/ destination/${S3_DST_BUCKET}/volumes)
+  end_time=$(date +"%s") 
+  notification_message+="{
+              \"keyValue\": {
+                \"topLabel\": \"Syncing Volumes\",
+                \"content\": \"${message:--}\",
+                \"contentMultiline\": \"true\",
+                \"bottomLabel\": \"Duration: $(($end_time - $start_time)) seconds\"
+              }
+            },"
+}
+
+sync_minio() {
+   start_time=$(date +"%s")
+   message=$(mc mirror --overwrite source/${MINIO_SRC_BUCKET} destination/${S3_DST_BUCKET}/minio/)
+   end_time=$(date +"%s") 
+   notification_message+="{
+              \"keyValue\": {
+                \"topLabel\": \"Syncing Minio\",
+                \"content\": \"${message:--}\",
+                \"contentMultiline\": \"true\",
+                \"bottomLabel\": \"Duration: $(($end_time - $start_time)) seconds\"
+              }
+            },"
+}
+
+### Container Startup
+print_debug "Backup routines Initialized on $(date)"
+
+### Wait for Next time to start backup
+current_time=$(date +"%s")
+today=$(date +"%Y-%m-%d")
+
+[[ ("${DB_DUMP_BEGIN}" = "-1") ]] && dump_begin="NOW" || dump_begin=${DB_DUMP_BEGIN} 
+
+if [[ $dump_begin = "NOW" ]]; then
+    waittime=10
+    target_time=$(($current_time + $waittime))
+else
+    target_time=$(date --date="${today} ${dump_begin}" +"%s")
+    if [[ "$target_time" < "$current_time" ]]; then
+        target_time=$(($target_time + 24*60*60))
+    fi
+    waittime=$(($target_time - $current_time))
+fi
+
+notification_message="{
+        \"textParagraph\": {
+            \"text\": \"Next Backup at $(date -d @${target_time} +"%Y-%m-%d %T %Z")\"
+        } 
+    }"
+send_notification
+
+print_notice "Next Backup at $(date -d @${target_time} +"%Y-%m-%d %T %Z")"
+sleep $waittime
+
+### Commence Backup
+while true; do
+
+    print_info "Starting backups..."
+    notification_message="{
+        \"textParagraph\": {
+            \"text\": \"Starting Backup at $(date +"%Y-%m-%d %T %Z")\"
+        } 
+    }"
+    send_notification
+
+    # make sure the directory exists
+    mkdir -p $tmpdir
+
+    ### Sync Mongo
+    if $ENABLE_MONGO_BACKUP; then
+        print_info "Dumping MongoDB..."
+        backup_mongo
+        print_info "MongoDB Dump Complete"
+
+        print_info "Syncing MongoDB..."
+        sync_mongo
+        print_info "MongoDB Sync Complete"
+    fi
+
+    ### Sync Volumes
+    if $ENABLE_VOLUME_BACKUP; then
+        print_info "Syncing Volumes..."
+        sync_volumes
+        print_info "Volumes Sync Complete"
+    fi
+
+    ### Sync Minio
+    if $ENABLE_MINIO_BACKUP; then
+        print_info "Syncing Minio..."
+        sync_minio
+        print_info "Minio Sync Complete"
+    fi
+     
+    notification_message+="{
+        \"textParagraph\": {
+            \"text\": \"Backups completed, waiting ${DB_DUMP_FREQ} minutes before next process...\"
+        } 
+    }"
+    echo $notification_message
+    send_notification
+
+    print_info "Backups completed, waiting ${DB_DUMP_FREQ} minutes before next process..."
+
+    ### Go back to Sleep until next Backup time
+    sleep $(($DB_DUMP_FREQ*60))
+done
+

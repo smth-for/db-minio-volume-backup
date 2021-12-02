@@ -1,0 +1,27 @@
+version: '2'
+
+services:
+
+
+  example-backup:
+    container_name: example-backup
+    image: smthfor/db-minio-volume-backup
+    volumes:
+      - ./volumes:/backupVolume
+    environment:
+      - S3_DST_HOST=
+      - S3_DST_BUCKET=
+      - S3_DST_KEY_ID=
+      - S3_DST_KEY_SECRET=
+      - DB_HOST=localhost
+      - DB_NAME=db
+      - DB_USER=""
+      - DB_PASS=""
+      - MINIO_SRC_HOST=localhost:9000
+      - MINIO_SRC_BUCKET=test
+      - MINIO_SRC_KEY_ID=minioadmin
+      - MINIO_SRC_KEY_SECRET=minioadmin
+      - DB_DUMP_FREQ=5
+      - GOOGLE_CHAT_IDENTIFIER=test
+      - GOOGLE_CHAT_EDNPOINT=
+    restart: always
