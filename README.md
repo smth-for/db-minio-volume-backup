@@ -25,8 +25,8 @@ Minio
   - MINIO_SRC_KEY_SECRET
 
 Additional params
-  - DB_DUMP_FREQ in minutes, frequency of backup, default 1440 (1 day)
-  - DB_DUMP_BEGIN format is hh:mm default is -1 that means immediately
+  - DUMP_FREQ in minutes, frequency of backup, default 1440 (1 day)
+  - DUMP_BEGIN format is hh:mm default is -1 that means immediately
 
 Notifications on google chat
   - GOOGLE_CHAT_IDENTIFIER text title to identify the server

@@ -11,8 +11,8 @@ tmpdir=/tmp/backups
 volumedir=/backupVolume
 notification_message=""
 
-DB_DUMP_BEGIN=${DB_DUMP_BEGIN:--1}
-DB_DUMP_FREQ=${DB_DUMP_FREQ:-1440}
+DUMP_BEGIN=${DUMP_BEGIN:--1}
+DB_DUMP_FREQ=${DUMP_FREQ:-1440}
 GOOGLE_CHAT_IDENTIFIER=${GOOGLE_CHAT_IDENTIFIER:-"Test"}
 
 [[ ( -n "${GOOGLE_CHAT_EDNPOINT}" ) ]] && USE_NOTIFICATION=true || USE_NOTIFICATION=false
@@ -104,47 +104,81 @@ backup_mongo() {
             },"
 }
 
-sync_mongo() {
-    start_time=$(date +"%s")
-    message=$(mc cp ${tmpdir}/${target} destination/${S3_DST_BUCKET}/database/)
-    end_time=$(date +"%s") 
+# $1 is the topLabel
+# $2 is the timing
+# $3 is the result message 
+# $4 is the suffix
+generate_notification_message() {
+
+    topLabel="$1"
+    timing=$2
+    resultMessage=$3
+    suffix="$4"
+
+    transferredBytes=0
+    speedBytes=0
+
+    successTransfer=-1
+    errorTransfer=0
+    totalStatus="error"
+    echo "$message"
+    while IFS= read -r line; do
+        status=$(echo $line | jq -r '.status')
+        if [[ $status = "error" ]]; then
+            errorTransfer=$(($errorTransfer + 1))
+        else
+            successTransfer=$(($successTransfer + 1))
+        fi
+        transferredBytes=$(echo $line | jq -r '.transferred')
+        speedBytes=$(echo $line | jq -r '.speed')
+        totalStatus="$status"
+    done <<< "$resultMessage"
+
+    transferredBytes=$(numfmt --to iec --format "%8.1f" $transferredBytes)
+    speedBytes=$(numfmt --to iec --format "%8.1f" $speedBytes)
+
     notification_message+="{
               \"keyValue\": {
-                \"topLabel\": \"Syncing Mongo\",
-                \"content\": \"${message:--}\",
+                \"topLabel\": \"$topLabel\",
+                \"content\": \"
+Number of files: $(($successTransfer + $errorTransfer)) 
+Transfer Errors: $errorTransfer 
+Overall Status: $totalStatus
+                \",
                 \"contentMultiline\": \"true\",
-                \"bottomLabel\": \"Duration: $(($end_time - $start_time)) seconds\"
+                \"bottomLabel\": \"
+Duration: $timing seconds 
+Transferred: $transferredBytes 
+Speed: $speedBytes
+                \"
               }
-            },"
+            }$suffix"
+}
+
+sync_mongo() {
+    start_time=$(date +"%s")
+    message=$(mc cp ${tmpdir}/${target} destination/${S3_DST_BUCKET}/database/ --json)
+    end_time=$(date +"%s") 
+
+    generate_notification_message "Syncing Mongo" $(($end_time - $start_time)) "$message" ","
+
     rm -rf ${tmpdir}/"${target}"
 }
 
 sync_volumes() {
   start_time=$(date +"%s")
-  message=$(mc mirror ${volumedir}/ destination/${S3_DST_BUCKET}/volumes)
+  message=$(mc mirror ${volumedir}/ destination/${S3_DST_BUCKET}/volumes --json)
   end_time=$(date +"%s") 
-  notification_message+="{
-              \"keyValue\": {
-                \"topLabel\": \"Syncing Volumes\",
-                \"content\": \"${message:--}\",
-                \"contentMultiline\": \"true\",
-                \"bottomLabel\": \"Duration: $(($end_time - $start_time)) seconds\"
-              }
-            },"
+
+  generate_notification_message "Syncing Volumes" $(($end_time - $start_time)) "$message" ","
 }
 
 sync_minio() {
    start_time=$(date +"%s")
-   message=$(mc mirror --overwrite source/${MINIO_SRC_BUCKET} destination/${S3_DST_BUCKET}/minio/)
+   message=$(mc mirror --overwrite source/${MINIO_SRC_BUCKET} destination/${S3_DST_BUCKET}/minio/ --json)
    end_time=$(date +"%s") 
-   notification_message+="{
-              \"keyValue\": {
-                \"topLabel\": \"Syncing Minio\",
-                \"content\": \"${message:--}\",
-                \"contentMultiline\": \"true\",
-                \"bottomLabel\": \"Duration: $(($end_time - $start_time)) seconds\"
-              }
-            },"
+
+   generate_notification_message "Syncing Minio" $(($end_time - $start_time)) "$message" ","
 }
 
 ### Container Startup
@@ -154,7 +188,7 @@ print_debug "Backup routines Initialized on $(date)"
 current_time=$(date +"%s")
 today=$(date +"%Y-%m-%d")
 
-[[ ("${DB_DUMP_BEGIN}" = "-1") ]] && dump_begin="NOW" || dump_begin=${DB_DUMP_BEGIN} 
+[[ ("${DUMP_BEGIN}" = "-1") ]] && dump_begin="NOW" || dump_begin=${DUMP_BEGIN} 
 
 if [[ $dump_begin = "NOW" ]]; then
     waittime=10
@@ -218,15 +252,15 @@ while true; do
      
     notification_message+="{
         \"textParagraph\": {
-            \"text\": \"Backups completed, waiting ${DB_DUMP_FREQ} minutes before next process...\"
+            \"text\": \"Backups completed, waiting ${DUMP_FREQ} minutes before next process...\"
         } 
     }"
     echo $notification_message
     send_notification
 
-    print_info "Backups completed, waiting ${DB_DUMP_FREQ} minutes before next process..."
+    print_info "Backups completed, waiting ${DUMP_FREQ} minutes before next process..."
 
     ### Go back to Sleep until next Backup time
-    sleep $(($DB_DUMP_FREQ*60))
+    sleep $(($DUMP_FREQ*60))
 done
 
