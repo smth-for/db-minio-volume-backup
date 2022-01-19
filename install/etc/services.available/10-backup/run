@@ -12,7 +12,7 @@ volumedir=/backupVolume
 notification_message=""
 
 DUMP_BEGIN=${DUMP_BEGIN:--1}
-DB_DUMP_FREQ=${DUMP_FREQ:-1440}
+DUMP_FREQ=${DUMP_FREQ:-1440}
 GOOGLE_CHAT_IDENTIFIER=${GOOGLE_CHAT_IDENTIFIER:-"Test"}
 
 [[ ( -n "${GOOGLE_CHAT_EDNPOINT}" ) ]] && USE_NOTIFICATION=true || USE_NOTIFICATION=false
@@ -88,11 +88,36 @@ fi
 
 ### Functions
 
+# $1 is the folder name
+# $2 is the content
+save_log() {
+    echo "Saving log file..."
+
+    path="/logs/${1}"
+    # che folder existance
+    if [ ! -d "$path" ]; then
+        # Take action if $DIR exists. #
+        echo "Creating logs folder ${path}..."
+        mkdir "$path"
+    fi
+
+    NOW=$(date +"%F")
+    NOWT=$(date +"%T")
+    # save log to file
+    echo $2 > "${path}/${NOW}_${NOWT}.log"
+    echo "Log file '${path}/${NOW}_${NOWT}.log' saved!"
+    
+    echo "Cleaning up old log files..."
+    # delete old log files (older than 5 days)
+    find "${path}" -mindepth 1 -mtime +5 -delete
+}
+
 backup_mongo() {
     start_time=$(date +"%s")
     target=${DB_NAME}_${MONGO_DB_HOST}.archive.gz
     mongo_compression="--gzip"
     message=$(mongodump --archive=${tmpdir}/${target} ${mongo_compression} --host ${MONGO_DB_HOST} --port ${MONGO_DB_PORT} ${MONGO_USER_STR}${MONGO_PASS_STR}${MONGO_AUTH_STR}${MONGO_DB_STR} ${DB_EXTRA_OPTS})
+    save_log "mongo_backup" "${message}" 
     end_time=$(date +"%s") 
     notification_message+="{
               \"keyValue\": {
@@ -109,6 +134,8 @@ backup_mongo() {
 # $3 is the result message 
 # $4 is the suffix
 generate_notification_message() {
+    
+    echo "$3"
 
     topLabel="$1"
     timing=$2
@@ -159,6 +186,7 @@ sync_mongo() {
     message=$(mc cp ${tmpdir}/${target} destination/${S3_DST_BUCKET}/database/ --json)
     end_time=$(date +"%s") 
 
+    save_log "mongo_sync" "${message}"
     generate_notification_message "Syncing Mongo" $(($end_time - $start_time)) "$message" ","
 
     rm -rf ${tmpdir}/"${target}"
@@ -169,6 +197,7 @@ sync_volumes() {
   message=$(mc mirror ${volumedir}/ destination/${S3_DST_BUCKET}/volumes --json)
   end_time=$(date +"%s") 
 
+  save_log "volume_sync" "${message}"
   generate_notification_message "Syncing Volumes" $(($end_time - $start_time)) "$message" ","
 }
 
@@ -177,6 +206,7 @@ sync_minio() {
    message=$(mc mirror --overwrite source/${MINIO_SRC_BUCKET} destination/${S3_DST_BUCKET}/minio/ --json)
    end_time=$(date +"%s") 
 
+   save_log "minio_sync" "${message}"
    generate_notification_message "Syncing Minio" $(($end_time - $start_time)) "$message" ","
 }
 

@@ -11,5 +11,8 @@ RUN mc --version   # Just to make sure its installed alright
 # create data folder in which mount volumes
 RUN mkdir /backupVolume
 
+# create directory for logs
+RUN mkdir /logs
+
 ### S6 Setup
 ADD install  /

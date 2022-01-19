@@ -1,6 +1,7 @@
 Image created to backup mongodb, files and minio on S3 compatible
 
 To backup one or more volumes, folders, files, map them in `/backupVolume` folder 
+Logs are in `/logs` folder and are rotated every 5 days
 
 Docker environment:
 
